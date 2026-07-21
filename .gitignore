@@ -1,0 +1,24 @@
+# Claude Code local settings
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Model artifacts / normalization stats
+*.h5
+*.npz
+
+# Generated outputs
+outputs/
+forecast.csv
+forecast_lstm.csv
+forecast_esn.csv
+prediction.csv
+lstm_predictions*.csv
