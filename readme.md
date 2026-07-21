@@ -21,7 +21,7 @@ utilities for comparing and visualizing results.
 │   ├── test.csv               # default input for predict mode
 │   └── samples/               # assorted sample CSVs
 ├── notebooks/
-│   └── Copy_of_main.ipynb     # exploratory notebook
+│   └── train_colab.ipynb      # Colab GPU training + weight transfer
 ├── outputs/                   # generated weights/stats/predictions (git-ignored)
 ├── requirements.txt
 └── README.md
@@ -58,20 +58,32 @@ pip install -r requirements.txt
 
 Trains one LSTM across all files in `data/train/`, saves weights and
 normalization stats to `outputs/`, then (in predict mode) rolls the model
-forward to generate future points. Behaviour is controlled by the constants at
-the top of the file — most importantly `MODE = "train" | "predict"`.
+forward to generate future points. The constants at the top of the file are
+defaults; most can be overridden on the command line (`--help` lists them all).
 
 ```bash
-# Train on every CSV in data/train/ (writes outputs/lstm_weights.weights.h5 + outputs/lstm_stats.npz)
-python src/lstm_train_predict.py            # with MODE = "train"
+# Full training run (writes outputs/lstm_weights.weights.h5 + outputs/lstm_stats.npz)
+python src/lstm_train_predict.py --mode train
+
+# Quick sanity check: 1 epoch on a single file
+python src/lstm_train_predict.py --mode train --sanity
 
 # Forecast from data/test.csv using the saved weights (writes outputs/lstm_predictions.csv)
-python src/lstm_train_predict.py            # with MODE = "predict"
+python src/lstm_train_predict.py --mode predict
 ```
 
-Key settings: `SEQUENCE_LENGTH`, `LSTM_UNITS`, `EPOCHS`, `BATCH_SIZE`,
-`WINDOW_STRIDE` (training-window subsampling), `PREDICT_INPUT_POINTS`,
-`PREDICT_OUTPUT_POINTS`.
+Common overrides: `--epochs`, `--batch-size`, `--sequence-length`, `--units`,
+`--learning-rate`, `--max-train-files N` (train on the first N files only),
+`--weights` / `--stats` (artifact paths). Other settings — `WINDOW_STRIDE`
+(training-window subsampling), `PREDICT_INPUT_POINTS`, `PREDICT_OUTPUT_POINTS` —
+remain constants at the top of the file.
+
+### Training on Colab
+
+`notebooks/train_colab.ipynb` clones the repo, installs dependencies, runs a
+sanity or production training on Colab's GPU, and copies the resulting weights to
+Google Drive (or downloads them). Set the runtime to GPU first, and add a
+`GITHUB_TOKEN` Colab secret since the repo is private.
 
 ## Standalone forecasters
 

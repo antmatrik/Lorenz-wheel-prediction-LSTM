@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 """LSTM training/prediction workflow for Lorenz water-wheel time series.
 
-Two modes (set via the MODE constant below):
-1) train   -> train on many CSV files in data/train/, save weights + normalization stats
+Two modes, selected with --mode (default from the MODE constant below):
+1) train   -> train on many CSV files in data/train/, save weights + stats to outputs/
 2) predict -> load weights, take the first PREDICT_INPUT_POINTS rows of data/test.csv
               as history, and export PREDICT_OUTPUT_POINTS future points
 
-Run from the project root, e.g.:  python src/lstm_train_predict.py
+The constants below are defaults; most can be overridden on the command line.
+Run from the project root, e.g.:
+
+    python src/lstm_train_predict.py --mode train            # full training
+    python src/lstm_train_predict.py --mode train --sanity   # quick check: 1 epoch, 1 file
+    python src/lstm_train_predict.py --mode predict
+    python src/lstm_train_predict.py --help
 """
 
+import argparse
 import os
 import signal
 from glob import glob
@@ -32,6 +39,10 @@ MODE = "train"  # "train" | "predict"
 # -------- train mode settings --------
 # Pattern that matches many training files (example: around 25 files).
 TRAIN_FILES_GLOB = str(PROJECT_ROOT / "data" / "train" / "*.csv")
+
+# Limit training to the first N matched files (None or 0 = use all).
+# Handy for quick sanity checks; override with --max-train-files.
+MAX_TRAIN_FILES = None
 
 # How much of each file is used for training windows.
 TRAIN_RATIO = 1
@@ -440,6 +451,9 @@ def train_mode():
     if not train_files:
         raise ValueError(f"No files matched TRAIN_FILES_GLOB: {TRAIN_FILES_GLOB}")
 
+    if MAX_TRAIN_FILES:
+        train_files = train_files[:MAX_TRAIN_FILES]
+
     print(f"[TRAIN] matched files: {len(train_files)}")
 
     series = []
@@ -698,7 +712,96 @@ def predict_mode():
     )
 
 
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """CLI overrides for the configuration constants above."""
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--mode",
+        choices=["train", "predict"],
+        default=MODE,
+        help=f"Run mode (default: {MODE}).",
+    )
+    p.add_argument(
+        "--sanity",
+        action="store_true",
+        help="Quick end-to-end check: train 1 epoch on 1 file. "
+        "Explicit flags below still override.",
+    )
+
+    g = p.add_argument_group("training")
+    g.add_argument("--epochs", type=int, help=f"Training epochs (default: {EPOCHS}).")
+    g.add_argument("--batch-size", type=int, help=f"Batch size (default: {BATCH_SIZE}).")
+    g.add_argument("--sequence-length", type=int, help=f"Input window length (default: {SEQUENCE_LENGTH}).")
+    g.add_argument("--units", type=int, help=f"LSTM hidden units (default: {LSTM_UNITS}).")
+    g.add_argument("--learning-rate", type=float, help=f"Adam learning rate (default: {LEARNING_RATE}).")
+    g.add_argument("--max-train-files", type=int, help="Use only the first N training files (0 = all).")
+    g.add_argument("--train-glob", help="Override the training-file glob pattern.")
+
+    g = p.add_argument_group("predict")
+    g.add_argument("--predict-file", help=f"Input CSV for predict mode (default: {PREDICT_FILE_PATH}).")
+    g.add_argument("--predict-input-points", type=int, help=f"History points to feed (default: {PREDICT_INPUT_POINTS}).")
+    g.add_argument("--predict-output-points", type=int, help=f"Future points to forecast (default: {PREDICT_OUTPUT_POINTS}).")
+    g.add_argument("--predict-output", help="Output CSV path for predictions.")
+
+    g = p.add_argument_group("artifacts")
+    g.add_argument("--weights", help="Weights path (train output / predict input).")
+    g.add_argument("--stats", help="Normalization-stats .npz path (train output / predict input).")
+
+    return p
+
+
+def _apply_overrides(args) -> None:
+    """Override module-level configuration constants from parsed CLI args."""
+    global MODE, EPOCHS, BATCH_SIZE, SEQUENCE_LENGTH, LSTM_UNITS, LEARNING_RATE
+    global MAX_TRAIN_FILES, TRAIN_FILES_GLOB
+    global PREDICT_FILE_PATH, PREDICT_INPUT_POINTS, PREDICT_OUTPUT_POINTS, PREDICT_OUTPUT_PATH
+    global WEIGHTS_OUTPUT_PATH, WEIGHTS_INPUT_PATH, STATS_OUTPUT_PATH, STATS_INPUT_PATH
+
+    MODE = args.mode
+
+    # --sanity sets fast defaults; explicit flags below still take precedence.
+    if args.sanity:
+        EPOCHS = 1
+        MAX_TRAIN_FILES = 1
+
+    if args.epochs is not None:
+        EPOCHS = args.epochs
+    if args.batch_size is not None:
+        BATCH_SIZE = args.batch_size
+    if args.sequence_length is not None:
+        SEQUENCE_LENGTH = args.sequence_length
+    if args.units is not None:
+        LSTM_UNITS = args.units
+    if args.learning_rate is not None:
+        LEARNING_RATE = args.learning_rate
+    if args.max_train_files is not None:
+        MAX_TRAIN_FILES = args.max_train_files
+    if args.train_glob is not None:
+        TRAIN_FILES_GLOB = args.train_glob
+
+    if args.predict_file is not None:
+        PREDICT_FILE_PATH = args.predict_file
+    if args.predict_input_points is not None:
+        PREDICT_INPUT_POINTS = args.predict_input_points
+    if args.predict_output_points is not None:
+        PREDICT_OUTPUT_POINTS = args.predict_output_points
+    if args.predict_output is not None:
+        PREDICT_OUTPUT_PATH = args.predict_output
+
+    # A single path serves as both the save target (train) and load source (predict).
+    if args.weights is not None:
+        WEIGHTS_OUTPUT_PATH = WEIGHTS_INPUT_PATH = args.weights
+    if args.stats is not None:
+        STATS_OUTPUT_PATH = STATS_INPUT_PATH = args.stats
+
+
 def main():
+    args = _build_arg_parser().parse_args()
+    _apply_overrides(args)
+
     if MODE == "train":
         train_mode()
     elif MODE == "predict":
