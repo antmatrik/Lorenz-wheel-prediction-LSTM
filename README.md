@@ -82,8 +82,7 @@ remain constants at the top of the file.
 
 `notebooks/train_colab.ipynb` clones the repo, installs dependencies, runs a
 sanity or production training on Colab's GPU, and copies the resulting weights to
-Google Drive (or downloads them). Set the runtime to GPU first, and add a
-`GITHUB_TOKEN` Colab secret since the repo is private.
+Google Drive (or downloads them). Set the runtime to GPU first.
 
 ## Standalone forecasters
 
