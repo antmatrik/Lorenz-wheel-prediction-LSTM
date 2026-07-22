@@ -404,6 +404,18 @@ def build_window_datasets(tf, file_splits, mean, std, seq_len: int):
         tf.TensorSpec(shape=(1,), dtype=tf.float32),
     )
 
+    # The datasets are made infinite with .repeat(), so fit() must be told how
+    # many batches make one epoch. Without this, Keras 3 treats one generator
+    # pass as the whole run and stops after ~1 epoch ("input ran out of data").
+    # Train windows are subsampled by WINDOW_STRIDE; validation windows are dense.
+    def _ceil_div(a: int, b: int) -> int:
+        return -(-a // b)
+
+    train_samples = sum(_ceil_div(tw, WINDOW_STRIDE) for _, _, tw, _ in file_splits)
+    val_samples = sum(vw for _, _, _, vw in file_splits)
+    steps_per_epoch = max(1, _ceil_div(train_samples, BATCH_SIZE))
+    val_steps = max(1, _ceil_div(val_samples, BATCH_SIZE))
+
     train_ds = tf.data.Dataset.from_generator(
         make_generator("train"),
         output_signature=signature,
@@ -412,16 +424,16 @@ def build_window_datasets(tf, file_splits, mean, std, seq_len: int):
         buffer_size=max(BATCH_SIZE * 4, TRAIN_SHUFFLE_BUFFER),
         seed=RANDOM_SEED,
         reshuffle_each_iteration=True,
-    ).batch(BATCH_SIZE)
-    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    )
+    train_ds = train_ds.repeat().batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
     val_ds = tf.data.Dataset.from_generator(
         make_generator("val"),
         output_signature=signature,
-    ).batch(BATCH_SIZE)
-    val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
+    )
+    val_ds = val_ds.repeat().batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
-    return train_ds, val_ds
+    return train_ds, val_ds, steps_per_epoch, val_steps
 
 
 def train_mode():
@@ -496,7 +508,7 @@ def train_mode():
     tf, model = build_lstm_model(SEQUENCE_LENGTH, LSTM_UNITS, LEARNING_RATE)
     tf.keras.utils.set_random_seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
-    train_ds, val_ds = build_window_datasets(
+    train_ds, val_ds, steps_per_epoch, val_steps = build_window_datasets(
         tf=tf,
         file_splits=file_splits,
         mean=mean,
@@ -604,7 +616,9 @@ def train_mode():
         model.fit(
             train_ds,
             epochs=effective_epochs,
+            steps_per_epoch=steps_per_epoch,
             validation_data=val_ds,
+            validation_steps=val_steps,
             verbose=0,
             callbacks=callbacks,
         )
