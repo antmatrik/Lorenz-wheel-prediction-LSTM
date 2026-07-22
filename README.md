@@ -95,10 +95,14 @@ After training, score the model against `data/test-dataset/` (50 `<NN>_in.csv` /
 `<NN>_out.csv` pairs) to get comparable numbers across training attempts:
 
 ```bash
-python src/evaluate.py                             # full: all 50 pairs, 1800 steps each
+python src/evaluate.py                             # full run: all 50 pairs (batched)
 python src/evaluate.py --limit 5 --max-steps 300   # quick smoke eval
 python src/evaluate.py --input-rows 1800           # seed from only the last minute of input
 ```
+
+All files are advanced **in one batch**, so a full run costs about one model call
+per forecast step (~1800 total), not one per file-step (50×1800); `--max-steps`
+reduces it further.
 
 For each pair it seeds the model with the last `--input-rows` rows of the input,
 forecasts as many steps as the output file has, and compares predicted vs actual

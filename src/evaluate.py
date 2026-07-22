@@ -6,6 +6,10 @@ For each ``<NN>_in.csv`` / ``<NN>_out.csv`` pair the model is seeded with the la
 file has (capped by ``--max-steps``), and the predicted angular velocity is
 compared against the actual angular velocity (column 0) of the output file.
 
+The forecast is **batched across files**: all selected files are advanced
+together, so the whole run costs one model call per step (``horizon`` calls),
+not one call per file-step (``files x horizon``).
+
 Two families of metrics are reported, because the wheel can flip spin direction
 at bifurcation points that no model can reliably predict:
 
@@ -20,8 +24,8 @@ across training attempts. The primary single number is the mean |omega| RMSE.
 
 Run from the project root, e.g.:
 
-    python src/evaluate.py --input-rows 1800
-    python src/evaluate.py --limit 5 --max-steps 300      # quick smoke eval
+    python src/evaluate.py                          # all pairs, full horizon
+    python src/evaluate.py --limit 5 --max-steps 300   # quick smoke eval
 """
 import argparse
 import csv
@@ -38,7 +42,7 @@ from lstm_train_predict import (
     WEIGHTS_INPUT_PATH,
     build_lstm_model,
     load_lorenz_waterwheel_csv,
-    run_autoregressive_prediction,
+    standardize_apply,
 )
 
 
@@ -70,25 +74,15 @@ def compute_metrics(pred_w: np.ndarray, actual_w: np.ndarray) -> dict:
     }
 
 
-def evaluate_pair(
-    model,
-    in_path: Path,
-    out_path: Path,
-    input_rows: int,
-    max_steps: int,
-    seq_len: int,
-    mean: np.ndarray,
-    std: np.ndarray,
-) -> dict:
-    """Forecast one input file and score the angular-velocity prediction."""
+def _load_pair(in_path: Path, out_path: Path, input_rows: int, max_steps: int, seq_len: int) -> dict:
+    """Load one input/output pair into the pieces the batched rollout needs."""
     x_in = load_lorenz_waterwheel_csv(str(in_path))
     x_out = load_lorenz_waterwheel_csv(str(out_path))
 
     history = x_in[-input_rows:] if input_rows and input_rows < len(x_in) else x_in
     if len(history) < seq_len:
         raise ValueError(
-            f"history has {len(history)} rows but SEQUENCE_LENGTH={seq_len}; "
-            "increase --input-rows."
+            f"history has {len(history)} rows but SEQUENCE_LENGTH={seq_len}; increase --input-rows."
         )
 
     horizon = len(x_out)
@@ -100,20 +94,52 @@ def evaluate_pair(
     if not np.isfinite(dt) or dt == 0:
         dt = 1.0
 
-    preds = run_autoregressive_prediction(
-        model=model,
-        input_wsc=history[:, :3],
-        forecast_points=horizon,
-        seq_len=seq_len,
-        mean=mean,
-        std=std,
-        dt=dt,
-    )
+    return {
+        "name": in_path.name.replace("_in.csv", ""),
+        "seed": history[-seq_len:, :3].astype(float),  # real-units [w, sin, cos]
+        "theta0": float(np.arctan2(history[-1, 1], history[-1, 2])),
+        "w_prev": float(history[-1, 0]),
+        "dt": dt,
+        "actual_w": x_out[:horizon, 0].astype(float),
+        "horizon": horizon,
+    }
 
-    metrics = compute_metrics(preds[:, 0], x_out[:horizon, 0])
-    metrics["file"] = in_path.name.replace("_in.csv", "")
-    metrics["steps"] = horizon
-    return metrics
+
+def run_batched_rollout(model, seeds_scaled, theta0, w_prev, dt, horizon, mean, std) -> np.ndarray:
+    """Advance N files together: one batched model call per step (N x seq_len x 3).
+
+    Same physics-informed rollout as the single-file path -- predict omega,
+    integrate it into the wheel angle, reconstruct sin/cos -- vectorised over the
+    file (batch) dimension. Returns predicted angular velocity, shape (N, horizon).
+    """
+    roll = np.array(seeds_scaled, dtype=np.float32, copy=True)
+    theta = np.asarray(theta0, dtype=float).copy()
+    w_prev = np.asarray(w_prev, dtype=float).copy()
+    dt = np.asarray(dt, dtype=float)
+    n = roll.shape[0]
+    preds_w = np.zeros((n, horizon))
+    m0, s0 = float(mean[0]), float(std[0])
+
+    for t in range(horizon):
+        out = model(roll, training=False)
+        out = out.numpy() if hasattr(out, "numpy") else np.asarray(out)
+        w_next = out.reshape(n, -1)[:, 0] * s0 + m0  # inverse z-score of channel 0
+
+        theta = theta + 0.5 * (w_prev + w_next) * dt
+        sin_next = np.sin(theta)
+        cos_next = np.cos(theta)
+
+        preds_w[:, t] = w_next
+
+        nxt = standardize_apply(
+            np.stack([w_next, sin_next, cos_next], axis=1), mean, std
+        ).astype(np.float32)
+        roll[:, :-1] = roll[:, 1:]
+        roll[:, -1] = nxt
+
+        w_prev = w_next
+
+    return preds_w
 
 
 def evaluate_dataset(
@@ -126,26 +152,46 @@ def evaluate_dataset(
     std: np.ndarray,
     limit: int,
 ) -> tuple[list[dict], dict]:
-    """Evaluate every <NN>_in/_out pair and return per-file rows + the aggregate."""
+    """Batched evaluation over every <NN>_in/_out pair; returns rows + aggregate."""
     in_files = sorted(test_dir.glob("*_in.csv"))
     if limit:
         in_files = in_files[:limit]
     if not in_files:
         raise ValueError(f"No *_in.csv files found in {test_dir}")
 
-    rows: list[dict] = []
+    loaded: list[dict] = []
     for in_path in in_files:
         out_path = in_path.with_name(in_path.name.replace("_in.csv", "_out.csv"))
         if not out_path.exists():
             print(f"[EVAL] skipped {in_path.name}: no matching _out file", flush=True)
             continue
         try:
-            row = evaluate_pair(
-                model, in_path, out_path, input_rows, max_steps, seq_len, mean, std
-            )
+            loaded.append(_load_pair(in_path, out_path, input_rows, max_steps, seq_len))
         except Exception as exc:  # keep going; report which file failed
             print(f"[EVAL] skipped {in_path.name}: {exc}", flush=True)
-            continue
+
+    if not loaded:
+        raise ValueError("No test pairs were evaluated.")
+
+    seeds = np.stack([standardize_apply(d["seed"], mean, std) for d in loaded]).astype(np.float32)
+    theta0 = np.array([d["theta0"] for d in loaded])
+    w_prev = np.array([d["w_prev"] for d in loaded])
+    dt = np.array([d["dt"] for d in loaded])
+    horizon = max(d["horizon"] for d in loaded)
+
+    print(
+        f"[EVAL] batched rollout: {len(loaded)} files x {horizon} steps "
+        f"-> {horizon} model calls (batch of {len(loaded)})",
+        flush=True,
+    )
+    preds_w = run_batched_rollout(model, seeds, theta0, w_prev, dt, horizon, mean, std)
+
+    rows: list[dict] = []
+    for i, d in enumerate(loaded):
+        h = d["horizon"]
+        row = compute_metrics(preds_w[i, :h], d["actual_w"][:h])
+        row["file"] = d["name"]
+        row["steps"] = h
         rows.append(row)
         print(
             f"[EVAL] {row['file']}: rmse={row['rmse']:.4f} "
@@ -153,9 +199,6 @@ def evaluate_dataset(
             f"corr={row['corr']:.3f}",
             flush=True,
         )
-
-    if not rows:
-        raise ValueError("No test pairs were evaluated.")
 
     keys = ["rmse", "mae", "rmse_abs", "mae_abs", "rmse_mirror", "corr"]
     aggregate = {k: float(np.nanmean([r[k] for r in rows])) for k in keys}
@@ -196,13 +239,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--max-steps",
         type=int,
         default=0,
-        help="Cap the forecast horizon per file (0 = full output-file length).",
+        help="Cap the forecast horizon per file (0 = full output-file length). "
+        "Fewer steps = fewer model calls = faster.",
     )
     p.add_argument(
         "--limit",
         type=int,
         default=0,
-        help="Evaluate only the first N pairs (0 = all). Handy for quick checks.",
+        help="Evaluate only the first N pairs (0 = all).",
     )
     p.add_argument("--sequence-length", type=int, default=SEQUENCE_LENGTH,
                    help="Must match the trained model (default: %(default)s).")
