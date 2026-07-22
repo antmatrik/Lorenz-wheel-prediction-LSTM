@@ -165,25 +165,46 @@ def configure_tensorflow_runtime(tf):
 
     tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
-    tf.config.optimizer.set_jit(True)
-
+    # Is any visible GPU newer than the arch this TF wheel shipped kernels for?
+    unsupported = []
     if max_supported is not None:
-        unsupported = []
         for gpu in gpus:
             details = tf.config.experimental.get_device_details(gpu)
             cc = _parse_sm_capability(details.get("compute_capability"))
             if cc is not None and cc > max_supported:
                 unsupported.append((gpu.name, cc))
 
-        if unsupported:
-            print(
-                "[TF] Detected GPU architecture newer than this TensorFlow build supports; "
-                "falling back to CPU runtime for stability.",
-                flush=True,
-            )
-            for name, cc in unsupported:
-                print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
-            tf.config.set_visible_devices([], "GPU")
+    force_cpu = str(os.environ.get("LORENZ_FORCE_CPU", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+    if unsupported and force_cpu:
+        # Explicit opt-out (LORENZ_FORCE_CPU=1): ignore the newer GPU, run on CPU.
+        print("[TF] LORENZ_FORCE_CPU set: disabling GPU, training on CPU.", flush=True)
+        for name, cc in unsupported:
+            print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
+        tf.config.set_visible_devices([], "GPU")
+        tf.config.optimizer.set_jit(False)
+    elif unsupported:
+        # Keep the GPU. This wheel ships no cubins for this arch, so XLA would
+        # JIT *everything* from PTX ("30 minutes or longer"). Disable XLA so the
+        # cuDNN LSTM path runs directly on the GPU instead. If the GPU proves
+        # unstable, re-run with LORENZ_FORCE_CPU=1 or install a TF build with
+        # matching sm_XY kernels.
+        newest = max(cc for _, cc in unsupported)
+        print(
+            "[TF] GPU is newer (sm_%d%d) than this TensorFlow build ships kernels "
+            "for; keeping the GPU and disabling XLA to avoid a long PTX compile. "
+            "If it stalls/errors, re-run with LORENZ_FORCE_CPU=1."
+            % (newest[0], newest[1]),
+            flush=True,
+        )
+        for name, cc in unsupported:
+            print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
+        tf.config.optimizer.set_jit(False)
+    else:
+        # Fully supported GPU (or arch undetectable): full XLA JIT.
+        tf.config.optimizer.set_jit(True)
 
     _TF_RUNTIME_CONFIGURED = True
 
