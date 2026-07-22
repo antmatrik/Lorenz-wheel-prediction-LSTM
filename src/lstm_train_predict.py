@@ -6,6 +6,11 @@ Two modes, selected with --mode (default from the MODE constant below):
 2) predict -> load weights, take the first PREDICT_INPUT_POINTS rows of data/test.csv
               as history, and export PREDICT_OUTPUT_POINTS future points
 
+The network takes all three channels [angular_velocity, sin, cos] as input but
+predicts only the next angular velocity. During the forecast, sin/cos are
+reconstructed by integrating that velocity into the wheel angle (theta), so they
+stay valid inputs without being predicted directly.
+
 The constants below are defaults; most can be overridden on the command line.
 Run from the project root, e.g.:
 
@@ -225,56 +230,8 @@ def standardize_apply(values: np.ndarray, mean: np.ndarray, std: np.ndarray):
     return out
 
 
-def renormalize_sincos(state: np.ndarray):
-    """
-    Force sin/cos back onto unit circle.
-    state shape: (...,3)
-    """
-
-    sin_val = state[..., 1]
-    cos_val = state[..., 2]
-
-    radius = np.sqrt(sin_val * sin_val + cos_val * cos_val)
-
-    mask = radius > 1e-8
-
-    sin_val[mask] /= radius[mask]
-    cos_val[mask] /= radius[mask]
-
-    # fallback if network outputs exactly [0,0]
-    sin_val[~mask] = 0.0
-    cos_val[~mask] = 1.0
-
-    state[..., 1] = sin_val
-    state[..., 2] = cos_val
-
-    return state
-
-
-def standardize_inverse(values: np.ndarray, mean: np.ndarray, std: np.ndarray):
-    """Inverse z-score only for standardized channels."""
-    out = values.copy()
-
-    channels = np.array(STANDARDIZE_CHANNELS)
-
-    out[:, channels] = out[:, channels] * std[channels] + mean[channels]
-
-    return out
-
-
-def build_windows(series_wsc: np.ndarray, seq_len: int):
-    """Build [seq_len,3] -> [3] windows for next-step prediction."""
-    x, y = [], []
-    for i in range(len(series_wsc) - seq_len):
-        x.append(series_wsc[i : i + seq_len])
-        y.append(series_wsc[i + seq_len])
-    if not x:
-        raise ValueError("Not enough points for chosen sequence length.")
-    return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-
-
 def build_lstm_model(seq_len: int, units: int, learning_rate: float):
-    """Create and compile LSTM model architecture."""
+    """Create and compile the LSTM: 3-channel input -> single angular-velocity output."""
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     try:
@@ -307,7 +264,8 @@ def build_lstm_model(seq_len: int, units: int, learning_rate: float):
                 units // 4,
                 activation="swish",
             ),
-            tf.keras.layers.Dense(3, dtype="float32"),
+            # Single output: next-step angular velocity (float32 for mixed-precision stability).
+            tf.keras.layers.Dense(1, dtype="float32"),
         ]
     )
     model.compile(
@@ -327,28 +285,50 @@ def run_autoregressive_prediction(
     seq_len,
     mean,
     std,
+    dt,
     log_every_steps=0,
 ):
+    """Free-run forecast.
 
+    The model predicts only the next angular velocity; the wheel angle is advanced
+    by integrating that velocity, and sin/cos are reconstructed from the angle so
+    the full 3-channel state can be fed back as the next input step.
+
+    input_wsc: real-units history, columns [angular_velocity, sin, cos].
+    dt:        time step between rows (seconds), from the epoch column.
+    Returns an array of shape (forecast_points, 3) = [angular_velocity, sin, cos].
+    """
     wsc_scaled = standardize_apply(input_wsc, mean, std).astype(np.float32)
 
     rollout_seq = wsc_scaled[-seq_len:].copy().reshape(1, seq_len, 3)
 
     preds = np.zeros((forecast_points, 3))
 
+    # Seed the integrator from the last observed point.
+    w_prev = float(input_wsc[-1, 0])
+    theta = float(np.arctan2(input_wsc[-1, 1], input_wsc[-1, 2]))
+
     for i in range(forecast_points):
-        y_next_scaled = model(rollout_seq, training=False).numpy()[0]
+        # Model output is the next angular velocity in standardized units.
+        w_next_scaled = float(model(rollout_seq, training=False).numpy()[0, 0])
+        # Inverse z-score of the standardized channel 0 (angular velocity).
+        w_next = w_next_scaled * std[0] + mean[0]
 
-        y_real = standardize_inverse(y_next_scaled.reshape(1, 3), mean, std)[0]
+        # Advance the wheel angle by trapezoidal integration, then derive sin/cos.
+        theta += 0.5 * (w_prev + w_next) * dt
+        sin_next = float(np.sin(theta))
+        cos_next = float(np.cos(theta))
 
-        y_real = renormalize_sincos(y_real.reshape(1, 3))[0]
+        preds[i] = (w_next, sin_next, cos_next)
 
-        preds[i] = y_real
-
-        y_scaled_corrected = standardize_apply(y_real.reshape(1, 3), mean, std)[0]
-
+        # Feed the reconstructed [w, sin, cos] back as the next input step.
+        next_scaled = standardize_apply(
+            np.array([[w_next, sin_next, cos_next]], dtype=float), mean, std
+        )[0]
         rollout_seq[0, :-1] = rollout_seq[0, 1:]
-        rollout_seq[0, -1] = y_scaled_corrected
+        rollout_seq[0, -1] = next_scaled
+
+        w_prev = w_next
 
         if log_every_steps:
             step = i + 1
@@ -414,13 +394,14 @@ def build_window_datasets(tf, file_splits, mean, std, seq_len: int):
 
                 step = WINDOW_STRIDE if subset == "train" else 1
                 for i in range(start, end, step):
-                    yield (scaled[i : i + seq_len], scaled[i + seq_len])
+                    # Target is the next-step angular velocity only (channel 0).
+                    yield (scaled[i : i + seq_len], scaled[i + seq_len, 0:1])
 
         return gen
 
     signature = (
         tf.TensorSpec(shape=(seq_len, 3), dtype=tf.float32),
-        tf.TensorSpec(shape=(3,), dtype=tf.float32),
+        tf.TensorSpec(shape=(1,), dtype=tf.float32),
     )
 
     train_ds = tf.data.Dataset.from_generator(
@@ -693,6 +674,12 @@ def predict_mode():
         flush=True,
     )
 
+    # Time step used to integrate angular velocity into wheel angle during rollout.
+    epochs = input_block[:, 3]
+    dt = float(np.median(np.diff(epochs))) if len(epochs) >= 2 else 1.0
+    if not np.isfinite(dt) or dt == 0:
+        dt = 1.0
+
     preds = run_autoregressive_prediction(
         model=model,
         input_wsc=input_block[:, :3],
@@ -700,6 +687,7 @@ def predict_mode():
         seq_len=SEQUENCE_LENGTH,
         mean=mean,
         std=std,
+        dt=dt,
         log_every_steps=PREDICT_LOG_EVERY_STEPS,
     )
 

@@ -58,7 +58,10 @@ pip install -r requirements.txt
 
 Trains one LSTM across all files in `data/train/`, saves weights and
 normalization stats to `outputs/`, then (in predict mode) rolls the model
-forward to generate future points. The constants at the top of the file are
+forward to generate future points. The network takes all three channels
+(`angular_velocity, sin, cos`) as input but **predicts only the next angular
+velocity**; during the forecast, `sin`/`cos` are reconstructed by integrating
+that velocity into the wheel angle. The constants at the top of the file are
 defaults; most can be overridden on the command line (`--help` lists them all).
 
 ```bash
