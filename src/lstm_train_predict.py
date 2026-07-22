@@ -174,33 +174,43 @@ def configure_tensorflow_runtime(tf):
             if cc is not None and cc > max_supported:
                 unsupported.append((gpu.name, cc))
 
-    force_cpu = str(os.environ.get("LORENZ_FORCE_CPU", "")).strip().lower() in {
+    # Opt-in override: try the newer GPU anyway via PTX JIT. Off by default
+    # because on some archs (e.g. Blackwell / sm_120 with an older bundled CUDA
+    # toolkit) that path fails at kernel launch (CUDA_ERROR_INVALID_HANDLE), so
+    # the GPU is effectively unusable and forcing it just crashes.
+    force_gpu = str(os.environ.get("LORENZ_FORCE_GPU", "")).strip().lower() in {
         "1", "true", "yes", "on",
     }
 
-    if unsupported and force_cpu:
-        # Explicit opt-out (LORENZ_FORCE_CPU=1): ignore the newer GPU, run on CPU.
-        print("[TF] LORENZ_FORCE_CPU set: disabling GPU, training on CPU.", flush=True)
-        for name, cc in unsupported:
-            print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
-        tf.config.set_visible_devices([], "GPU")
-        tf.config.optimizer.set_jit(False)
-    elif unsupported:
-        # Keep the GPU. This wheel ships no cubins for this arch, so XLA would
-        # JIT *everything* from PTX ("30 minutes or longer"). Disable XLA so the
-        # cuDNN LSTM path runs directly on the GPU instead. If the GPU proves
-        # unstable, re-run with LORENZ_FORCE_CPU=1 or install a TF build with
-        # matching sm_XY kernels.
+    if unsupported and force_gpu:
         newest = max(cc for _, cc in unsupported)
         print(
-            "[TF] GPU is newer (sm_%d%d) than this TensorFlow build ships kernels "
-            "for; keeping the GPU and disabling XLA to avoid a long PTX compile. "
-            "If it stalls/errors, re-run with LORENZ_FORCE_CPU=1."
+            "[TF] LORENZ_FORCE_GPU set: keeping GPU (sm_%d%d) with XLA disabled; "
+            "this may crash if PTX JIT is unsupported on this arch."
             % (newest[0], newest[1]),
             flush=True,
         )
         for name, cc in unsupported:
             print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
+        tf.config.optimizer.set_jit(False)
+    elif unsupported:
+        # No kernels for this GPU and PTX JIT is unreliable here -> the GPU can't
+        # be used by this TF build. Fall back to CPU, but LOUDLY: the old silent
+        # fallback wasted entire training runs before anyone noticed.
+        newest = max(cc for _, cc in unsupported)
+        bar = "=" * 72
+        print(bar, flush=True)
+        print(f"[TF] This TensorFlow build has no CUDA kernels for your GPU "
+              f"(sm_{newest[0]}{newest[1]}) and its PTX fallback is unreliable on this", flush=True)
+        print("[TF] architecture -> TRAINING ON CPU (slow). To use the GPU, either:", flush=True)
+        print("[TF]   * pip install -U tensorflow   (needs a build shipping "
+              f"sm_{newest[0]}{newest[1]} kernels), or", flush=True)
+        print("[TF]   * switch the runtime to a supported GPU (e.g. L4 / A100).", flush=True)
+        print("[TF] To force the GPU anyway (may crash): set LORENZ_FORCE_GPU=1.", flush=True)
+        print(bar, flush=True)
+        for name, cc in unsupported:
+            print(f"[TF] GPU {name} compute capability={cc[0]}.{cc[1]}", flush=True)
+        tf.config.set_visible_devices([], "GPU")
         tf.config.optimizer.set_jit(False)
     else:
         # Fully supported GPU (or arch undetectable): full XLA JIT.
