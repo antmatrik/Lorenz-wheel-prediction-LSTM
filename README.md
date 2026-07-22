@@ -98,11 +98,33 @@ After training, score the model against `data/test-dataset/` (50 `<NN>_in.csv` /
 python src/evaluate.py                             # full run: all 50 pairs (batched)
 python src/evaluate.py --limit 5 --max-steps 300   # quick smoke eval
 python src/evaluate.py --input-rows 1800           # seed from only the last minute of input
+python src/evaluate.py --horizons 25,50,100,200,400,800,1800   # skill-vs-horizon sweep + baselines
 ```
 
 All files are advanced **in one batch**, so a full run costs about one model call
 per forecast step (~1800 total), not one per file-step (50×1800); `--max-steps`
 reduces it further.
+
+### Skill vs horizon (`--horizons`)
+
+Because the wheel is chaotic, pointwise skill decays as the forecast reaches
+further ahead — a single full-horizon number hides this. `--horizons` runs **one**
+rollout to the largest horizon and reports metrics at each cutoff, alongside two
+naive baselines (`base0` = predict ω=0; `persist` = hold the last observed ω) so
+each number has a "beat this" anchor:
+
+```
+ steps   ~sec |    corr   signed  |w|RMSE   mirror |  base0|w| persist|w|
+    25    0.8 |   0.90     ...      1.4      ...    |    ~7.8     ...
+   100    3.3 |   0.47     7.16     3.93     6.70   |    ...      ...
+   300    9.9 |   0.17    10.04     5.58     9.68   |    ...      ...
+  1800   60.1 |   0.03    10.99     6.39    10.79   |    ...      ...
+```
+
+Read it as: the model is trustworthy while `|w|RMSE` stays well below the baseline
+columns and `corr` stays high. Signed error is inflated by chaotic direction flips
+(bifurcations) that no model can predict, so compare **`|w|RMSE` (magnitude)**
+across training runs.
 
 For each pair it seeds the model with the last `--input-rows` rows of the input,
 forecasts as many steps as the output file has, and compares predicted vs actual

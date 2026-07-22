@@ -207,6 +207,104 @@ def evaluate_dataset(
     return rows, aggregate
 
 
+def _aggregate_at(preds_w: np.ndarray, loaded: list[dict], h: int) -> dict:
+    """Mean metrics over files when each forecast is truncated to ``h`` steps."""
+    keys = ["rmse", "mae", "rmse_abs", "mae_abs", "rmse_mirror", "corr"]
+    rows = []
+    for i, d in enumerate(loaded):
+        hh = min(h, d["horizon"])
+        rows.append(compute_metrics(preds_w[i, :hh], d["actual_w"][:hh]))
+    out = {}
+    for k in keys:
+        # Drop NaNs manually (a constant baseline has undefined correlation) so
+        # np.nanmean does not warn on an all-NaN column.
+        vals = [r[k] for r in rows if r[k] == r[k]]
+        out[k] = float(np.mean(vals)) if vals else float("nan")
+    return out
+
+
+def evaluate_horizons(
+    model,
+    test_dir: Path,
+    input_rows: int,
+    seq_len: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+    limit: int,
+    horizons: list[int],
+) -> list[dict]:
+    """Skill-vs-horizon sweep with naive baselines.
+
+    Runs ONE batched rollout to the largest horizon (the rollout is purely
+    autoregressive, so a step's prediction is the same regardless of the total
+    horizon -- we just slice it at each cutoff). At each horizon it also scores
+    two references so the model's numbers have a "beat this" anchor:
+
+    * base0    -- predict omega = 0 everywhere;
+    * persist  -- hold the last observed omega constant.
+
+    Chaos guarantees skill decays with horizon; this shows *where*.
+    """
+    horizons = sorted({int(h) for h in horizons if int(h) > 0})
+    if not horizons:
+        raise ValueError("--horizons must contain at least one positive integer.")
+
+    in_files = sorted(Path(test_dir).glob("*_in.csv"))
+    if limit:
+        in_files = in_files[:limit]
+
+    loaded: list[dict] = []
+    for in_path in in_files:
+        out_path = in_path.with_name(in_path.name.replace("_in.csv", "_out.csv"))
+        if not out_path.exists():
+            print(f"[EVAL] skipped {in_path.name}: no matching _out file", flush=True)
+            continue
+        try:
+            loaded.append(_load_pair(in_path, out_path, input_rows, max(horizons), seq_len))
+        except Exception as exc:
+            print(f"[EVAL] skipped {in_path.name}: {exc}", flush=True)
+
+    if not loaded:
+        raise ValueError("No test pairs were evaluated.")
+
+    max_h = max(d["horizon"] for d in loaded)
+    horizons = [h for h in horizons if h <= max_h] or [max_h]
+    dt_med = float(np.median([d["dt"] for d in loaded]))
+
+    seeds = np.stack([standardize_apply(d["seed"], mean, std) for d in loaded]).astype(np.float32)
+    theta0 = np.array([d["theta0"] for d in loaded])
+    w_prev = np.array([d["w_prev"] for d in loaded])
+    dt = np.array([d["dt"] for d in loaded])
+
+    print(f"[EVAL] horizon sweep: {len(loaded)} files, one rollout of {max_h} steps "
+          f"-> {max_h} model calls", flush=True)
+    preds_w = run_batched_rollout(model, seeds, theta0, w_prev, dt, max_h, mean, std)
+
+    # Naive baselines over the same horizon (shape (n_files, max_h)).
+    zero = np.zeros((len(loaded), max_h))
+    persist = np.array([[d["w_prev"]] * max_h for d in loaded], dtype=float)
+
+    print("\n=== Skill vs horizon (mean over files) ===")
+    print(f"{'steps':>6} {'~sec':>6} | {'corr':>7} {'signed':>8} {'|w|RMSE':>8} "
+          f"{'mirror':>8} | {'base0|w|':>9} {'persist|w|':>10}")
+    print("-" * 78)
+    summary: list[dict] = []
+    for h in horizons:
+        m = _aggregate_at(preds_w, loaded, h)
+        z = _aggregate_at(zero, loaded, h)
+        p = _aggregate_at(persist, loaded, h)
+        print(f"{h:>6} {h * dt_med:>6.1f} | {m['corr']:>7.3f} {m['rmse']:>8.3f} "
+              f"{m['rmse_abs']:>8.3f} {m['rmse_mirror']:>8.3f} | "
+              f"{z['rmse_abs']:>9.3f} {p['rmse_abs']:>10.3f}", flush=True)
+        summary.append({"steps": h, "sec": h * dt_med, "model": m, "base0": z, "persist": p})
+
+    print("\n  Read it as: the model is useful while |w|RMSE stays well below the")
+    print("  base0/persist columns and corr stays high; chaos closes that gap as")
+    print("  the horizon grows. Signed error is inflated by direction flips that")
+    print("  no model can predict -- compare |w|RMSE (magnitude) across runs.")
+    return summary
+
+
 def _write_csv(output_path: Path, rows: list[dict], aggregate: dict) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["file", "steps", "rmse", "mae", "rmse_abs", "mae_abs", "rmse_mirror", "corr"]
@@ -241,6 +339,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=0,
         help="Cap the forecast horizon per file (0 = full output-file length). "
         "Fewer steps = fewer model calls = faster.",
+    )
+    p.add_argument(
+        "--horizons",
+        default="",
+        help="Comma-separated horizons for a skill-vs-horizon sweep with naive "
+        "baselines, e.g. '25,50,100,200,400,800,1800'. Runs ONE rollout to the "
+        "largest and reports metrics at each. Overrides --max-steps when set.",
     )
     p.add_argument(
         "--limit",
@@ -281,6 +386,20 @@ def main() -> None:
     _, model = build_lstm_model(args.sequence_length, args.units, LEARNING_RATE)
     model.load_weights(str(weights_path))
     print(f"[EVAL] loaded weights: {weights_path}", flush=True)
+
+    if args.horizons:
+        horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
+        evaluate_horizons(
+            model=model,
+            test_dir=Path(args.test_dir),
+            input_rows=args.input_rows,
+            seq_len=args.sequence_length,
+            mean=mean,
+            std=std,
+            limit=args.limit,
+            horizons=horizons,
+        )
+        return
 
     rows, aggregate = evaluate_dataset(
         model=model,
