@@ -11,6 +11,7 @@ utilities for comparing and visualizing results.
 .
 ├── src/                       # all Python scripts (each runnable standalone)
 │   ├── lstm_train_predict.py  # main pipeline: train on many files, then forecast
+│   ├── evaluate.py            # score a trained model on data/test-dataset (compare runs)
 │   ├── lstm_forecast.py       # single-file LSTM forecaster (CLI)
 │   ├── esn_forecast.py        # single-file ESN forecaster (CLI)
 │   ├── compare_lstm_esn.py    # train LSTM + ESN on one file and plot vs actual
@@ -18,6 +19,7 @@ utilities for comparing and visualizing results.
 │   └── visualize.py           # plot one input + two output CSVs
 ├── data/
 │   ├── train/                 # training CSVs for lstm_train_predict.py (25 files)
+│   ├── test-dataset/          # 50 <NN>_in / <NN>_out pairs used by evaluate.py
 │   ├── test.csv               # default input for predict mode
 │   └── samples/               # assorted sample CSVs
 ├── notebooks/
@@ -86,6 +88,35 @@ remain constants at the top of the file.
 `notebooks/train_colab.ipynb` clones the repo, installs dependencies, runs a
 sanity or production training on Colab's GPU, and copies the resulting weights to
 Google Drive (or downloads them). Set the runtime to GPU first.
+
+## Evaluating / comparing training runs — `evaluate.py`
+
+After training, score the model against `data/test-dataset/` (50 `<NN>_in.csv` /
+`<NN>_out.csv` pairs) to get comparable numbers across training attempts:
+
+```bash
+python src/evaluate.py                             # full: all 50 pairs, 1800 steps each
+python src/evaluate.py --limit 5 --max-steps 300   # quick smoke eval
+python src/evaluate.py --input-rows 1800           # seed from only the last minute of input
+```
+
+For each pair it seeds the model with the last `--input-rows` rows of the input,
+forecasts as many steps as the output file has, and compares predicted vs actual
+**angular velocity**. It reports:
+
+- **signed** RMSE/MAE — direction matters;
+- **`|ω|`** RMSE/MAE — magnitude only, sign-invariant;
+- **mirror** RMSE — the better of the error against `+actual` or `−actual`, i.e.
+  it forgives a single global direction flip (the wheel can reverse at
+  bifurcation points that no model can reliably predict);
+- signed correlation.
+
+The **primary comparison number is the mean `|ω|` RMSE**; per-file metrics are
+written to `outputs/eval_results.csv`.
+
+Note: the rollout conditions only on the last `SEQUENCE_LENGTH` rows, so
+`--input-rows` does not change the forecast as long as it stays ≥ `SEQUENCE_LENGTH`
+(≈8.5 s at this data's step) — it mainly controls the `dt` estimate.
 
 ## Standalone forecasters
 
