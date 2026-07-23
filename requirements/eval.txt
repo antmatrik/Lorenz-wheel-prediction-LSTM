@@ -5,3 +5,4 @@
 numpy
 tensorflow
 torch
+matplotlib  # only for evaluate.py --plots (per-file actual-vs-predicted PNGs)

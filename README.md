@@ -12,6 +12,7 @@ results.
 |---|---|---|---|---|---|
 | 1.1 | 2026-07-23 22:39 | "Antons Matrosovs" - Claude | Content | Add PyTorch TCN forecaster (`src/tcn/tcn_forecast.py`), wire it into `src/common/evaluate.py` (`--model tcn`, `--physics`), add a pytest suite, and add Colab train/compare cells | Medium |
 | 1.2 | 2026-07-24 01:07 | "Antons Matrosovs" - Claude | Structure | Reorganize `src/` into `lstm/ tcn/ esn/ common/` packages; split `requirements/` per model; commit canonical weights under `weights/`; split the Colab notebook into `train_lstm`, `train_tcn`, and `evaluate` | Medium |
+| 1.3 | 2026-07-24 01:58 | "Antons Matrosovs" - Claude | Content | Add per-file actual-vs-predicted plots to `src/common/evaluate.py` (`--plots`: one stacked PNG per horizon 100/300/600/1800, up to 50 files, model name in title); add matplotlib to `requirements/eval.txt`; render + download cells in the evaluate Colab notebook; add render tests | Medium |
 
 ## Project layout
 
@@ -168,6 +169,7 @@ python src/common/evaluate.py --model tcn --physics       # TCN via the LSTM-sty
 python src/common/evaluate.py --limit 5 --max-steps 300   # quick smoke eval
 python src/common/evaluate.py --input-rows 1800           # seed from only the last minute of input
 python src/common/evaluate.py --horizons 25,50,100,200,400,800,1800   # skill-vs-horizon sweep + baselines
+python src/common/evaluate.py --plots                     # + per-file actual-vs-predicted PNGs (see below)
 ```
 
 Point `--weights`/`--stats` (LSTM) or `--checkpoint` (TCN) at the committed artifacts to
@@ -219,6 +221,24 @@ forecasts as many steps as the output file has, and compares predicted vs actual
 
 The **primary comparison number is the mean `|ω|` RMSE**; per-file metrics are
 written to `outputs/eval_results.csv`.
+
+### Per-file plots (`--plots`)
+
+`--plots` additionally renders **one tall PNG per horizon** — up to 50 test files
+stacked as rows, each a full-width panel of **actual ω (blue) vs predicted ω (red)**,
+with the file name and its `|ω|`RMSE / `corr` labelled. The model name is in the
+figure title, so LSTM and TCN plots are easy to tell apart.
+
+```bash
+python src/common/evaluate.py --plots                      # horizons 100,300,600,1800 (default)
+python src/common/evaluate.py --model tcn --plots --plot-horizons 100,300
+```
+
+The panels are **sliced from the rollout that already runs** (no extra model calls);
+`--plot-horizons` picks the step cutoffs (`1800` ≈ the full ~60 s), `--plot-dir` the
+output folder (default `outputs/`). Files are named
+`eval_plots_<model>_h<steps>.png`. Requires `matplotlib` (in `requirements/eval.txt`).
+The Colab `evaluate` notebook runs this and downloads the PNGs for you.
 
 Note: the rollout conditions only on the last `SEQUENCE_LENGTH` rows, so
 `--input-rows` does not change the forecast as long as it stays ≥ `SEQUENCE_LENGTH`

@@ -216,8 +216,14 @@ def evaluate_dataset(
     input_rows: int,
     max_steps: int,
     limit: int,
+    plot_horizons: list[int] | None = None,
+    plot_dir: Path | None = None,
 ) -> tuple[list[dict], dict]:
-    """Batched evaluation over every <NN>_in/_out pair; returns rows + aggregate."""
+    """Batched evaluation over every <NN>_in/_out pair; returns rows + aggregate.
+
+    When ``plot_horizons`` is given, also render one tall actual-vs-predicted PNG
+    per horizon from the rollout already computed here (no extra model calls).
+    """
     in_files = sorted(test_dir.glob("*_in.csv"))
     if limit:
         in_files = in_files[:limit]
@@ -269,6 +275,13 @@ def evaluate_dataset(
     aggregate = {k: float(np.nanmean([r[k] for r in rows])) for k in keys}
     aggregate["file"] = "AGGREGATE(mean)"
     aggregate["steps"] = int(np.round(np.mean([r["steps"] for r in rows])))
+
+    if plot_horizons:
+        render_horizon_plots(
+            preds_w, loaded, backend.name,
+            plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs"),
+            plot_horizons,
+        )
     return rows, aggregate
 
 
@@ -367,6 +380,89 @@ def evaluate_horizons(
     return summary
 
 
+def render_horizon_plots(
+    preds_w: np.ndarray,
+    loaded: list[dict],
+    model_name: str,
+    out_dir: Path,
+    horizons: list[int],
+    max_rows: int = 50,
+) -> list[Path]:
+    """One tall PNG per horizon: up to ``max_rows`` test files stacked, each a single
+    actual-vs-predicted angular-velocity panel truncated to that horizon.
+
+    Every panel is sliced from ``preds_w`` (the rollout already computed by the
+    caller), so this adds no model calls -- only matplotlib rendering. Returns the
+    written PNG paths (empty if matplotlib is unavailable).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless: write files, never open a window
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[EVAL] --plots skipped: matplotlib unavailable ({exc}); "
+              f"pip install matplotlib", flush=True)
+        return []
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    n = min(len(loaded), max_rows)
+    if len(loaded) > max_rows:
+        print(f"[EVAL] plots: {len(loaded)} files > max_rows={max_rows}; "
+              f"plotting the first {n}.", flush=True)
+
+    avail = preds_w.shape[1]
+    # Clamp to what was actually rolled out and de-duplicate (e.g. with --max-steps).
+    horizons = sorted({min(int(h), avail) for h in horizons if int(h) > 0})
+    dt_med = float(np.median([d["dt"] for d in loaded]))
+    slug = "".join(c if c.isalnum() else "_" for c in model_name).strip("_") or "model"
+    actual_c, pred_c = "#1f77b4", "#d62728"
+    paths: list[Path] = []
+
+    for H in horizons:
+        fig, axes = plt.subplots(n, 1, figsize=(12, max(2.2, 1.35 * n)), squeeze=False)
+        axes = axes[:, 0]
+        for i in range(n):
+            d = loaded[i]
+            h = min(H, d["horizon"], avail)
+            t = np.arange(h) * d["dt"]
+            pred, actual = preds_w[i, :h], d["actual_w"][:h]
+            m = compute_metrics(pred, actual)
+
+            ax = axes[i]
+            ax.plot(t, actual, color=actual_c, lw=0.9, label="actual ω")
+            ax.plot(t, pred, color=pred_c, lw=0.9, alpha=0.8, label="predicted ω")
+            ax.axhline(0, color="0.7", lw=0.5)
+            ax.margins(x=0)
+            ax.tick_params(labelsize=7)
+            ax.text(0.006, 0.90, d["name"], transform=ax.transAxes,
+                    ha="left", va="top", fontsize=8, fontweight="bold")
+            ax.text(0.994, 0.90,
+                    f"|ω|RMSE={m['rmse_abs']:.2f}   corr={m['corr']:.2f}",
+                    transform=ax.transAxes, ha="right", va="top",
+                    fontsize=7, color="0.35")
+            if i == 0:
+                ax.legend(loc="upper center", fontsize=7, ncol=2, framealpha=0.6)
+            if i < n - 1:
+                ax.tick_params(labelbottom=False)  # only the bottom row shows the time axis
+        axes[-1].set_xlabel("time ahead (s)", fontsize=9)
+        fig.suptitle(
+            f"Model: {model_name}  —  actual vs predicted angular velocity (ω)  —  "
+            f"horizon {H} steps ≈ {H * dt_med:.0f} s  —  {n} test files",
+            fontsize=12, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.995])
+        path = out_dir / f"eval_plots_{slug}_h{H}.png"
+        fig.savefig(path, dpi=100)
+        plt.close(fig)
+        paths.append(path)
+        print(f"[EVAL] saved plot: {path}  ({n} files, horizon {H} ≈ "
+              f"{H * dt_med:.0f}s)", flush=True)
+
+    return paths
+
+
 def _write_csv(output_path: Path, rows: list[dict], aggregate: dict) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fields = ["file", "steps", "rmse", "mae", "rmse_abs", "mae_abs", "rmse_mirror", "corr"]
@@ -429,6 +525,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=0,
         help="Evaluate only the first N pairs (0 = all).",
     )
+    p.add_argument(
+        "--plots",
+        action="store_true",
+        help="Render one tall PNG per --plot-horizons value: up to 50 test files "
+        "stacked, each an actual-vs-predicted omega panel. Sliced from the rollout "
+        "already computed (no extra model calls). Requires matplotlib. Ignored with "
+        "--horizons.",
+    )
+    p.add_argument(
+        "--plot-horizons",
+        default="100,300,600,1800",
+        help="Comma-separated step horizons to render when --plots is set "
+        "(default: %(default)s; 1800 steps is the full ~60 s output).",
+    )
+    p.add_argument(
+        "--plot-dir",
+        default=str(PROJECT_ROOT / "outputs"),
+        help="Directory for the --plots PNGs (default: outputs/).",
+    )
     p.add_argument("--sequence-length", type=int, default=SEQUENCE_LENGTH,
                    help="LSTM only: must match the trained model (default: %(default)s). "
                         "The TCN's window comes from its checkpoint.")
@@ -489,6 +604,9 @@ def main() -> None:
     backend = _build_tcn_backend(args) if args.model == "tcn" else _build_lstm_backend(args)
 
     if args.horizons:
+        if args.plots:
+            print("[EVAL] note: --plots is ignored with --horizons; run without "
+                  "--horizons to render per-file plots.", flush=True)
         horizons = [int(x) for x in args.horizons.split(",") if x.strip()]
         evaluate_horizons(
             backend=backend,
@@ -499,12 +617,18 @@ def main() -> None:
         )
         return
 
+    plot_horizons = None
+    if args.plots:
+        plot_horizons = [int(x) for x in args.plot_horizons.split(",") if x.strip()]
+
     rows, aggregate = evaluate_dataset(
         backend=backend,
         test_dir=Path(args.test_dir),
         input_rows=args.input_rows,
         max_steps=args.max_steps,
         limit=args.limit,
+        plot_horizons=plot_horizons,
+        plot_dir=Path(args.plot_dir),
     )
 
     _write_csv(Path(args.output), rows, aggregate)

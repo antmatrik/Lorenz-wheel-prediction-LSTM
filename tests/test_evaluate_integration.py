@@ -66,6 +66,33 @@ def test_tcn_horizon_sweep(tiny_tcn_checkpoint, tiny_test_dataset):
         assert np.isfinite(s["base0"]["rmse_abs"])  # naive baseline always defined
 
 
+def test_render_horizon_plots_writes_one_png_per_horizon(tmp_path):
+    """--plots renders one PNG per horizon, named by model + horizon, from given arrays."""
+    pytest.importorskip("matplotlib")
+    rng = np.random.default_rng(0)
+    n, full = 3, 120
+    preds_w = rng.standard_normal((n, full))
+    loaded = [
+        {"name": f"{i:02d}", "actual_w": rng.standard_normal(full), "horizon": full, "dt": 0.033}
+        for i in range(n)
+    ]
+    paths = evaluate.render_horizon_plots(preds_w, loaded, "lstm", tmp_path, [50, 100])
+    assert {p.name for p in paths} == {"eval_plots_lstm_h50.png", "eval_plots_lstm_h100.png"}
+    assert all(p.exists() and p.stat().st_size > 0 for p in paths)
+
+
+def test_render_horizon_plots_clamps_and_dedupes_horizons(tmp_path):
+    """Horizons beyond the rollout length clamp to it and collapse to one PNG."""
+    pytest.importorskip("matplotlib")
+    preds_w = np.zeros((2, 40))
+    loaded = [
+        {"name": f"{i:02d}", "actual_w": np.zeros(40), "horizon": 40, "dt": 0.033}
+        for i in range(2)
+    ]
+    paths = evaluate.render_horizon_plots(preds_w, loaded, "tcn(physics)", tmp_path, [100, 300])
+    assert [p.name for p in paths] == ["eval_plots_tcn_physics_h40.png"]  # clamped + slugged
+
+
 def test_lstm_backend_regression(tiny_test_dataset):
     """The refactored LSTM path still runs (random weights are fine for a plumbing test)."""
     pytest.importorskip("tensorflow")
