@@ -1,0 +1,10 @@
+# Dependencies for the LSTM training/prediction pipeline (src/lstm/) and the
+# TensorFlow-backed comparison utilities.
+#
+# Versions are unpinned on purpose: on Google Colab -- where numpy, TensorFlow and
+# matplotlib are preinstalled and integrated with the CUDA/GPU stack -- installing this
+# is effectively a no-op and won't disturb the preinstalled environment. Add pins if you
+# need a reproducible local build.
+numpy
+tensorflow
+matplotlib

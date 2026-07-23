@@ -1,12 +1,10 @@
-# Direct dependencies only. A full `pip freeze` would also list TensorFlow's
-# transitive deps (absl-py, grpcio, h5py, protobuf, ml_dtypes, keras, ...);
-# those are intentionally omitted and left for pip to resolve.
+# Union of every model's dependencies -- convenient for local development and the test
+# suite (which exercises both the TensorFlow LSTM and the PyTorch TCN). pip de-duplicates
+# the shared packages (numpy, matplotlib).
 #
-# Versions are unpinned on purpose: on Google Colab -- where numpy, TensorFlow
-# and matplotlib are preinstalled and integrated with the CUDA/GPU stack --
-# `pip install -r requirements.txt` becomes effectively a no-op and won't
-# disturb the preinstalled environment. Add pins if you need a reproducible
-# local build.
-numpy
-tensorflow
-matplotlib
+# Per-model / per-notebook subsets live under requirements/:
+#   requirements/lstm.txt  -> LSTM training  (numpy, tensorflow, matplotlib)
+#   requirements/tcn.txt   -> TCN training   (numpy, torch, matplotlib)
+#   requirements/eval.txt  -> evaluation     (numpy, tensorflow, torch)
+-r requirements/lstm.txt
+-r requirements/tcn.txt

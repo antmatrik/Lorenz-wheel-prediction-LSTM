@@ -1,0 +1,8 @@
+# Dependencies for the PyTorch TCN training/prediction pipeline (src/tcn/).
+#
+# Versions are unpinned on purpose: on Google Colab the GPU build of torch is
+# preinstalled, so installing this is effectively a no-op there; locally it pulls a CPU
+# wheel. Add pins if you need a reproducible local build.
+numpy
+torch
+matplotlib
