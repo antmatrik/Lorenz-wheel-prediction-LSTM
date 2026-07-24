@@ -279,10 +279,10 @@ def evaluate_dataset(
     aggregate["steps"] = int(np.round(np.mean([r["steps"] for r in rows])))
 
     if plot_horizons:
+        pdir = plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs")
+        write_trajectory_csv(preds_w, loaded, backend.name, pdir, plot_max_rows)
         render_horizon_plots(
-            preds_w, loaded, backend.name,
-            plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs"),
-            plot_horizons, max_rows=plot_max_rows,
+            preds_w, loaded, backend.name, pdir, plot_horizons, max_rows=plot_max_rows,
         )
     return rows, aggregate
 
@@ -382,6 +382,45 @@ def evaluate_horizons(
     return summary
 
 
+def _model_slug(model_name: str) -> str:
+    """Filesystem-safe token for a model name (e.g. 'tcn(physics)' -> 'tcn_physics')."""
+    return "".join(c if c.isalnum() else "_" for c in model_name).strip("_") or "model"
+
+
+def write_trajectory_csv(
+    preds_w: np.ndarray,
+    loaded: list[dict],
+    model_name: str,
+    out_dir: Path,
+    max_rows: int = 10,
+) -> Path:
+    """Write the raw per-step series behind the plots to ``eval_traj_<model>.csv``.
+
+    Columns: ``file, step, t_sec, actual_w, pred_w``. Covers the first ``max_rows``
+    files (the ones the plots stack), each to its full horizon. This is the data the
+    graphs are drawn from -- the |omega| views are just the absolute values of these
+    two series -- so the plots can be reconstructed or re-analyzed from the CSV.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = min(len(loaded), max_rows)
+    avail = preds_w.shape[1]
+    path = out_dir / f"eval_traj_{_model_slug(model_name)}.csv"
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["file", "step", "t_sec", "actual_w", "pred_w"])
+        for i in range(n):
+            d = loaded[i]
+            h = min(d["horizon"], avail)
+            for s in range(h):
+                writer.writerow([
+                    d["name"], s, round(s * d["dt"], 4),
+                    round(float(d["actual_w"][s]), 6), round(float(preds_w[i, s]), 6),
+                ])
+    print(f"[EVAL] saved plot data: {path}  ({n} files, up to {avail} steps each)", flush=True)
+    return path
+
+
 def render_horizon_plots(
     preds_w: np.ndarray,
     loaded: list[dict],
@@ -422,7 +461,7 @@ def render_horizon_plots(
     # Clamp to what was actually rolled out and de-duplicate (e.g. with --max-steps).
     horizons = sorted({min(int(h), avail) for h in horizons if int(h) > 0})
     dt_med = float(np.median([d["dt"] for d in loaded]))
-    slug = "".join(c if c.isalnum() else "_" for c in model_name).strip("_") or "model"
+    slug = _model_slug(model_name)
     actual_c, pred_c = "#1f77b4", "#d62728"
     paths: list[Path] = []
 

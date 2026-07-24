@@ -14,7 +14,7 @@ results.
 | 1.3 | 2026-07-24 01:58 | "Antons Matrosovs" - Claude | Content | Add per-file actual-vs-predicted plots to `src/common/evaluate.py` (`--plots`: one stacked PNG per horizon 100/300/600/1800, up to 50 files, model name in title); add matplotlib to `requirements/eval.txt`; render + download cells in the evaluate Colab notebook; add render tests | Medium |
 | 1.4 | 2026-07-24 03:07 | "Antons Matrosovs" - Claude | Content | TCN trainer: add EarlyStopping (`--patience`), log LR per epoch + expose `--lr-patience`/`--lr-factor`, and re-save the best checkpoint every improving epoch; update the TCN Colab cell + tests | Medium |
 | 1.5 | 2026-07-24 03:47 | "Antons Matrosovs" - Claude | Content | `--plots`: change default horizons to 100/200/500/1800 and cap stacked rows at 10 via new `--plot-max-rows`; update README + evaluate Colab cell | Low |
-| 1.6 | 2026-07-24 14:09 | "Antons Matrosovs" - Claude | Content | `--plots`: render a second magnitude plot per horizon (`_abs` PNG — actual vs predicted absolute angular velocity, with magnitude correlation) alongside the signed one; update render tests + README | Low |
+| 1.6 | 2026-07-24 18:02 | "Antons Matrosovs" - Claude | Content | `--plots`: add a magnitude (absolute-value) plot per horizon (`_abs` PNG) and write `eval_traj_<model>.csv` (raw actual/predicted series behind the graphs) into the download bundle; make the 128×7 horizon-24 checkpoint the canonical `weights/tcn_checkpoint.pt`; update render tests + README | Medium |
 
 ## Project layout
 
@@ -242,6 +242,10 @@ so LSTM and TCN plots are easy to tell apart. The two variants are:
   `corr|ω|`). This is the fair view for this chaotic wheel: a *mirrored* forecast
   (right speed, wrong direction at a bifurcation) tracks well here even though the
   signed plot shows it diverging.
+
+Each `--plots` run also writes `eval_traj_<model>.csv` — the raw `actual_w` / `pred_w`
+series the plots are drawn from (first `--plot-max-rows` files, full horizon) — so the
+graphs can be reconstructed or re-analyzed. The Colab bundle includes it.
 
 ```bash
 python src/common/evaluate.py --plots                      # horizons 100,200,500,1800 (default)
