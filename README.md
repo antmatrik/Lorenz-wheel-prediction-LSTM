@@ -10,11 +10,11 @@ results.
 
 | Version | Date | Changed by | Type | Summary | Risk |
 |---|---|---|---|---|---|
-| 1.1 | 2026-07-23 22:39 | "Antons Matrosovs" - Claude | Content | Add PyTorch TCN forecaster (`src/tcn/tcn_forecast.py`), wire it into `src/common/evaluate.py` (`--model tcn`, `--physics`), add a pytest suite, and add Colab train/compare cells | Medium |
 | 1.2 | 2026-07-24 01:07 | "Antons Matrosovs" - Claude | Structure | Reorganize `src/` into `lstm/ tcn/ esn/ common/` packages; split `requirements/` per model; commit canonical weights under `weights/`; split the Colab notebook into `train_lstm`, `train_tcn`, and `evaluate` | Medium |
 | 1.3 | 2026-07-24 01:58 | "Antons Matrosovs" - Claude | Content | Add per-file actual-vs-predicted plots to `src/common/evaluate.py` (`--plots`: one stacked PNG per horizon 100/300/600/1800, up to 50 files, model name in title); add matplotlib to `requirements/eval.txt`; render + download cells in the evaluate Colab notebook; add render tests | Medium |
 | 1.4 | 2026-07-24 03:07 | "Antons Matrosovs" - Claude | Content | TCN trainer: add EarlyStopping (`--patience`), log LR per epoch + expose `--lr-patience`/`--lr-factor`, and re-save the best checkpoint every improving epoch; update the TCN Colab cell + tests | Medium |
 | 1.5 | 2026-07-24 03:47 | "Antons Matrosovs" - Claude | Content | `--plots`: change default horizons to 100/200/500/1800 and cap stacked rows at 10 via new `--plot-max-rows`; update README + evaluate Colab cell | Low |
+| 1.6 | 2026-07-24 18:02 | "Antons Matrosovs" - Claude | Content | `--plots`: add a magnitude (absolute-value) plot per horizon (`_abs` PNG) and write `eval_traj_<model>.csv` (raw actual/predicted series behind the graphs) into the download bundle; make the 128×7 horizon-24 checkpoint the canonical `weights/tcn_checkpoint.pt`; update render tests + README | Medium |
 
 ## Project layout
 
@@ -232,10 +232,20 @@ written to `outputs/eval_results.csv`.
 
 ### Per-file plots (`--plots`)
 
-`--plots` additionally renders **one tall PNG per horizon** — up to `--plot-max-rows`
-test files (default **10**) stacked as rows, each a full-width panel of **actual ω
-(blue) vs predicted ω (red)**, with the file name and its `|ω|`RMSE / `corr` labelled.
-The model name is in the figure title, so LSTM and TCN plots are easy to tell apart.
+`--plots` renders, **per horizon, two tall PNGs** — up to `--plot-max-rows` test files
+(default **10**) stacked as rows, each a full-width **actual (blue) vs predicted (red)**
+panel with the file name and metrics labelled. The model name is in the figure title,
+so LSTM and TCN plots are easy to tell apart. The two variants are:
+
+- **signed ω** — `eval_plots_<model>_h<steps>.png` (labelled `|ω|`RMSE / `corr`);
+- **`|ω|` magnitude** — `eval_plots_<model>_h<steps>_abs.png` (labelled `|ω|`RMSE /
+  `corr|ω|`). This is the fair view for this chaotic wheel: a *mirrored* forecast
+  (right speed, wrong direction at a bifurcation) tracks well here even though the
+  signed plot shows it diverging.
+
+Each `--plots` run also writes `eval_traj_<model>.csv` — the raw `actual_w` / `pred_w`
+series the plots are drawn from (first `--plot-max-rows` files, full horizon) — so the
+graphs can be reconstructed or re-analyzed. The Colab bundle includes it.
 
 ```bash
 python src/common/evaluate.py --plots                      # horizons 100,200,500,1800 (default)
@@ -245,9 +255,8 @@ python src/common/evaluate.py --model tcn --plots --plot-horizons 100,300 --plot
 The panels are **sliced from the rollout that already runs** (no extra model calls);
 `--plot-horizons` picks the step cutoffs (`1800` ≈ the full ~60 s), `--plot-max-rows`
 caps how many files are stacked (default 10), and `--plot-dir` sets the output folder
-(default `outputs/`). Files are named `eval_plots_<model>_h<steps>.png`. Requires
-`matplotlib` (in `requirements/eval.txt`). The Colab `evaluate` notebook runs this for
-each committed model and downloads the PNGs for you.
+(default `outputs/`). Requires `matplotlib` (in `requirements/eval.txt`). The Colab
+`evaluate` notebook runs this for each committed model and bundles every PNG for you.
 
 Note: the rollout conditions only on the last `SEQUENCE_LENGTH` rows, so
 `--input-rows` does not change the forecast as long as it stays ≥ `SEQUENCE_LENGTH`

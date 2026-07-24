@@ -279,10 +279,10 @@ def evaluate_dataset(
     aggregate["steps"] = int(np.round(np.mean([r["steps"] for r in rows])))
 
     if plot_horizons:
+        pdir = plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs")
+        write_trajectory_csv(preds_w, loaded, backend.name, pdir, plot_max_rows)
         render_horizon_plots(
-            preds_w, loaded, backend.name,
-            plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs"),
-            plot_horizons, max_rows=plot_max_rows,
+            preds_w, loaded, backend.name, pdir, plot_horizons, max_rows=plot_max_rows,
         )
     return rows, aggregate
 
@@ -382,6 +382,45 @@ def evaluate_horizons(
     return summary
 
 
+def _model_slug(model_name: str) -> str:
+    """Filesystem-safe token for a model name (e.g. 'tcn(physics)' -> 'tcn_physics')."""
+    return "".join(c if c.isalnum() else "_" for c in model_name).strip("_") or "model"
+
+
+def write_trajectory_csv(
+    preds_w: np.ndarray,
+    loaded: list[dict],
+    model_name: str,
+    out_dir: Path,
+    max_rows: int = 10,
+) -> Path:
+    """Write the raw per-step series behind the plots to ``eval_traj_<model>.csv``.
+
+    Columns: ``file, step, t_sec, actual_w, pred_w``. Covers the first ``max_rows``
+    files (the ones the plots stack), each to its full horizon. This is the data the
+    graphs are drawn from -- the |omega| views are just the absolute values of these
+    two series -- so the plots can be reconstructed or re-analyzed from the CSV.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = min(len(loaded), max_rows)
+    avail = preds_w.shape[1]
+    path = out_dir / f"eval_traj_{_model_slug(model_name)}.csv"
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["file", "step", "t_sec", "actual_w", "pred_w"])
+        for i in range(n):
+            d = loaded[i]
+            h = min(d["horizon"], avail)
+            for s in range(h):
+                writer.writerow([
+                    d["name"], s, round(s * d["dt"], 4),
+                    round(float(d["actual_w"][s]), 6), round(float(preds_w[i, s]), 6),
+                ])
+    print(f"[EVAL] saved plot data: {path}  ({n} files, up to {avail} steps each)", flush=True)
+    return path
+
+
 def render_horizon_plots(
     preds_w: np.ndarray,
     loaded: list[dict],
@@ -390,12 +429,16 @@ def render_horizon_plots(
     horizons: list[int],
     max_rows: int = 10,
 ) -> list[Path]:
-    """One tall PNG per horizon: up to ``max_rows`` test files stacked, each a single
-    actual-vs-predicted angular-velocity panel truncated to that horizon.
+    """Two tall PNGs per horizon -- signed omega and |omega| (magnitude) -- each
+    stacking up to ``max_rows`` test files as actual-vs-predicted panels truncated to
+    that horizon. The |omega| view is the fair magnitude comparison: a mirrored
+    forecast (right speed, wrong direction at a bifurcation) looks good there even
+    though it scores poorly on the signed plot.
 
     Every panel is sliced from ``preds_w`` (the rollout already computed by the
-    caller), so this adds no model calls -- only matplotlib rendering. Returns the
-    written PNG paths (empty if matplotlib is unavailable).
+    caller), so this adds no model calls -- only matplotlib rendering. Files are named
+    ``eval_plots_<model>_h<steps>.png`` (signed) and ``..._h<steps>_abs.png`` (|omega|).
+    Returns the written PNG paths (empty if matplotlib is unavailable).
     """
     try:
         import matplotlib
@@ -418,11 +461,12 @@ def render_horizon_plots(
     # Clamp to what was actually rolled out and de-duplicate (e.g. with --max-steps).
     horizons = sorted({min(int(h), avail) for h in horizons if int(h) > 0})
     dt_med = float(np.median([d["dt"] for d in loaded]))
-    slug = "".join(c if c.isalnum() else "_" for c in model_name).strip("_") or "model"
+    slug = _model_slug(model_name)
     actual_c, pred_c = "#1f77b4", "#d62728"
     paths: list[Path] = []
 
-    for H in horizons:
+    def _figure(H: int, absolute: bool) -> Path:
+        """Render one tall PNG for horizon H; signed omega, or |omega| if ``absolute``."""
         fig, axes = plt.subplots(n, 1, figsize=(12, max(2.2, 1.35 * n)), squeeze=False)
         axes = axes[:, 0]
         for i in range(n):
@@ -432,35 +476,54 @@ def render_horizon_plots(
             pred, actual = preds_w[i, :h], d["actual_w"][:h]
             m = compute_metrics(pred, actual)
 
+            if absolute:
+                y_pred, y_actual = np.abs(pred), np.abs(actual)
+                # Magnitude correlation, the |ω| analogue of the signed plot's corr.
+                if np.std(y_pred) > 1e-12 and np.std(y_actual) > 1e-12:
+                    mag_corr = float(np.corrcoef(y_pred, y_actual)[0, 1])
+                else:
+                    mag_corr = float("nan")
+                label = f"|ω|RMSE={m['rmse_abs']:.2f}   corr|ω|={mag_corr:.2f}"
+                a_lbl, p_lbl = "actual |ω|", "predicted |ω|"
+            else:
+                y_pred, y_actual = pred, actual
+                label = f"|ω|RMSE={m['rmse_abs']:.2f}   corr={m['corr']:.2f}"
+                a_lbl, p_lbl = "actual ω", "predicted ω"
+
             ax = axes[i]
-            ax.plot(t, actual, color=actual_c, lw=0.9, label="actual ω")
-            ax.plot(t, pred, color=pred_c, lw=0.9, alpha=0.8, label="predicted ω")
+            ax.plot(t, y_actual, color=actual_c, lw=0.9, label=a_lbl)
+            ax.plot(t, y_pred, color=pred_c, lw=0.9, alpha=0.8, label=p_lbl)
             ax.axhline(0, color="0.7", lw=0.5)
             ax.margins(x=0)
             ax.tick_params(labelsize=7)
             ax.text(0.006, 0.90, d["name"], transform=ax.transAxes,
                     ha="left", va="top", fontsize=8, fontweight="bold")
-            ax.text(0.994, 0.90,
-                    f"|ω|RMSE={m['rmse_abs']:.2f}   corr={m['corr']:.2f}",
-                    transform=ax.transAxes, ha="right", va="top",
+            ax.text(0.994, 0.90, label, transform=ax.transAxes, ha="right", va="top",
                     fontsize=7, color="0.35")
             if i == 0:
                 ax.legend(loc="upper center", fontsize=7, ncol=2, framealpha=0.6)
             if i < n - 1:
                 ax.tick_params(labelbottom=False)  # only the bottom row shows the time axis
         axes[-1].set_xlabel("time ahead (s)", fontsize=9)
+        kind = "|ω| (magnitude)" if absolute else "angular velocity (ω)"
         fig.suptitle(
-            f"Model: {model_name}  —  actual vs predicted angular velocity (ω)  —  "
+            f"Model: {model_name}  —  actual vs predicted {kind}  —  "
             f"horizon {H} steps ≈ {H * dt_med:.0f} s  —  {n} test files",
             fontsize=12, fontweight="bold",
         )
         fig.tight_layout(rect=[0, 0, 1, 0.995])
-        path = out_dir / f"eval_plots_{slug}_h{H}.png"
+        path = out_dir / f"eval_plots_{slug}_h{H}{'_abs' if absolute else ''}.png"
         fig.savefig(path, dpi=100)
         plt.close(fig)
-        paths.append(path)
-        print(f"[EVAL] saved plot: {path}  ({n} files, horizon {H} ≈ "
-              f"{H * dt_med:.0f}s)", flush=True)
+        return path
+
+    # Each horizon gets both the signed view and the |ω| (magnitude) view.
+    for H in horizons:
+        for absolute in (False, True):
+            path = _figure(H, absolute)
+            paths.append(path)
+            print(f"[EVAL] saved plot: {path}  ({n} files, horizon {H} ≈ "
+                  f"{H * dt_med:.0f}s, {'|ω|' if absolute else 'signed'})", flush=True)
 
     return paths
 
