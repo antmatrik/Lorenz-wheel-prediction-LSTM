@@ -1,0 +1,8 @@
+# Dependencies for the evaluation / comparison notebook (src/common/evaluate.py),
+# which scores BOTH models on the test set, so it needs both frameworks.
+#
+# Versions are unpinned on purpose (both TensorFlow and torch are preinstalled on Colab).
+numpy
+tensorflow
+torch
+matplotlib  # only for evaluate.py --plots (per-file actual-vs-predicted PNGs)

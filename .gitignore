@@ -6,14 +6,22 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+.pytest_cache/
 
 # macOS
 .DS_Store
 __MACOSX/
 
-# Model artifacts / normalization stats
+# Model artifacts / normalization stats (do not commit stray training outputs)
 *.h5
 *.npz
+*.pt
+
+# ...but DO commit the canonical model weights under weights/ so the evaluation
+# notebook can score them straight from a clone (see weights/README.md).
+!weights/*.h5
+!weights/*.npz
+!weights/*.pt
 
 # Generated outputs
 outputs/
