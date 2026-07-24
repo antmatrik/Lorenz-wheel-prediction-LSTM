@@ -66,8 +66,8 @@ def test_tcn_horizon_sweep(tiny_tcn_checkpoint, tiny_test_dataset):
         assert np.isfinite(s["base0"]["rmse_abs"])  # naive baseline always defined
 
 
-def test_render_horizon_plots_writes_one_png_per_horizon(tmp_path):
-    """--plots renders one PNG per horizon, named by model + horizon, from given arrays."""
+def test_render_horizon_plots_writes_signed_and_abs_png_per_horizon(tmp_path):
+    """--plots renders a signed AND an |ω| (_abs) PNG per horizon, named by model+horizon."""
     pytest.importorskip("matplotlib")
     rng = np.random.default_rng(0)
     n, full = 3, 120
@@ -77,12 +77,15 @@ def test_render_horizon_plots_writes_one_png_per_horizon(tmp_path):
         for i in range(n)
     ]
     paths = evaluate.render_horizon_plots(preds_w, loaded, "lstm", tmp_path, [50, 100])
-    assert {p.name for p in paths} == {"eval_plots_lstm_h50.png", "eval_plots_lstm_h100.png"}
+    assert {p.name for p in paths} == {
+        "eval_plots_lstm_h50.png", "eval_plots_lstm_h50_abs.png",
+        "eval_plots_lstm_h100.png", "eval_plots_lstm_h100_abs.png",
+    }
     assert all(p.exists() and p.stat().st_size > 0 for p in paths)
 
 
 def test_render_horizon_plots_clamps_and_dedupes_horizons(tmp_path):
-    """Horizons beyond the rollout length clamp to it and collapse to one PNG."""
+    """Horizons beyond the rollout length clamp to it and collapse to one horizon (2 PNGs)."""
     pytest.importorskip("matplotlib")
     preds_w = np.zeros((2, 40))
     loaded = [
@@ -90,7 +93,9 @@ def test_render_horizon_plots_clamps_and_dedupes_horizons(tmp_path):
         for i in range(2)
     ]
     paths = evaluate.render_horizon_plots(preds_w, loaded, "tcn(physics)", tmp_path, [100, 300])
-    assert [p.name for p in paths] == ["eval_plots_tcn_physics_h40.png"]  # clamped + slugged
+    assert sorted(p.name for p in paths) == [
+        "eval_plots_tcn_physics_h40.png", "eval_plots_tcn_physics_h40_abs.png",
+    ]  # clamped to 40, slugged, signed + |ω|
 
 
 def test_lstm_backend_regression(tiny_test_dataset):
