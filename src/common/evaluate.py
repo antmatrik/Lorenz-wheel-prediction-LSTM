@@ -218,11 +218,13 @@ def evaluate_dataset(
     limit: int,
     plot_horizons: list[int] | None = None,
     plot_dir: Path | None = None,
+    plot_max_rows: int = 10,
 ) -> tuple[list[dict], dict]:
     """Batched evaluation over every <NN>_in/_out pair; returns rows + aggregate.
 
     When ``plot_horizons`` is given, also render one tall actual-vs-predicted PNG
-    per horizon from the rollout already computed here (no extra model calls).
+    per horizon (up to ``plot_max_rows`` files) from the rollout already computed
+    here (no extra model calls).
     """
     in_files = sorted(test_dir.glob("*_in.csv"))
     if limit:
@@ -280,7 +282,7 @@ def evaluate_dataset(
         render_horizon_plots(
             preds_w, loaded, backend.name,
             plot_dir if plot_dir is not None else (PROJECT_ROOT / "outputs"),
-            plot_horizons,
+            plot_horizons, max_rows=plot_max_rows,
         )
     return rows, aggregate
 
@@ -386,7 +388,7 @@ def render_horizon_plots(
     model_name: str,
     out_dir: Path,
     horizons: list[int],
-    max_rows: int = 50,
+    max_rows: int = 10,
 ) -> list[Path]:
     """One tall PNG per horizon: up to ``max_rows`` test files stacked, each a single
     actual-vs-predicted angular-velocity panel truncated to that horizon.
@@ -528,16 +530,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--plots",
         action="store_true",
-        help="Render one tall PNG per --plot-horizons value: up to 50 test files "
-        "stacked, each an actual-vs-predicted omega panel. Sliced from the rollout "
-        "already computed (no extra model calls). Requires matplotlib. Ignored with "
-        "--horizons.",
+        help="Render one tall PNG per --plot-horizons value: up to --plot-max-rows "
+        "test files stacked, each an actual-vs-predicted omega panel. Sliced from the "
+        "rollout already computed (no extra model calls). Requires matplotlib. Ignored "
+        "with --horizons.",
     )
     p.add_argument(
         "--plot-horizons",
-        default="100,300,600,1800",
+        default="100,200,500,1800",
         help="Comma-separated step horizons to render when --plots is set "
         "(default: %(default)s; 1800 steps is the full ~60 s output).",
+    )
+    p.add_argument(
+        "--plot-max-rows",
+        type=int,
+        default=10,
+        help="Max test files (rows) per --plots PNG (default: %(default)s). "
+        "Extra files beyond this are skipped, plotting the first N.",
     )
     p.add_argument(
         "--plot-dir",
@@ -629,6 +638,7 @@ def main() -> None:
         limit=args.limit,
         plot_horizons=plot_horizons,
         plot_dir=Path(args.plot_dir),
+        plot_max_rows=args.plot_max_rows,
     )
 
     _write_csv(Path(args.output), rows, aggregate)
