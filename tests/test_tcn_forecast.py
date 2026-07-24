@@ -101,3 +101,44 @@ def test_train_one_epoch_runs(tmp_path, synthetic_series):
     )
     assert np.isfinite(best_val)
     assert out_path.exists()
+
+
+def _tiny_train_kwargs(synthetic_series, tmp_path):
+    window, horizon = 16, 3
+    scaler = tcn_forecast.fit_global_scaler([synthetic_series])
+    train_dss, val_dss = tcn_forecast.build_file_datasets(
+        [synthetic_series], scaler, window, horizon, val_fraction=0.2
+    )
+    from torch.utils.data import ConcatDataset
+
+    model = tcn_forecast.TCNPredictor(n_features=3, num_channels=(8, 8), kernel_size=2, dropout=0.0)
+    return dict(
+        model=model,
+        train_ds=ConcatDataset(train_dss),
+        val_ds=ConcatDataset(val_dss),
+        scaler=scaler,
+        window=window,
+        num_channels=(8, 8),
+        kernel_size=2,
+        batch_size=64,
+        device="cpu",
+        out_path=str(tmp_path / "m.pt"),
+    )
+
+
+def test_train_logs_learning_rate(tmp_path, synthetic_series, capsys):
+    """Each epoch line reports the current LR (so ReduceLROnPlateau is observable)."""
+    tcn_forecast.train(epochs=1, **_tiny_train_kwargs(synthetic_series, tmp_path))
+    out = capsys.readouterr().out
+    assert "lr " in out
+
+
+def test_train_early_stops_before_epoch_cap(tmp_path, synthetic_series, capsys):
+    """A huge min_delta makes 'improvement' impossible, so early stop must fire early."""
+    tcn_forecast.train(
+        epochs=50, patience=1, min_delta=1e9, **_tiny_train_kwargs(synthetic_series, tmp_path)
+    )
+    out = capsys.readouterr().out
+    assert "early stop" in out
+    epoch_lines = [ln for ln in out.splitlines() if ln.startswith("[TCN] epoch")]
+    assert len(epoch_lines) < 50  # stopped well before the cap

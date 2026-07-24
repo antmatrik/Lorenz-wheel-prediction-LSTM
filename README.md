@@ -13,6 +13,7 @@ results.
 | 1.1 | 2026-07-23 22:39 | "Antons Matrosovs" - Claude | Content | Add PyTorch TCN forecaster (`src/tcn/tcn_forecast.py`), wire it into `src/common/evaluate.py` (`--model tcn`, `--physics`), add a pytest suite, and add Colab train/compare cells | Medium |
 | 1.2 | 2026-07-24 01:07 | "Antons Matrosovs" - Claude | Structure | Reorganize `src/` into `lstm/ tcn/ esn/ common/` packages; split `requirements/` per model; commit canonical weights under `weights/`; split the Colab notebook into `train_lstm`, `train_tcn`, and `evaluate` | Medium |
 | 1.3 | 2026-07-24 01:58 | "Antons Matrosovs" - Claude | Content | Add per-file actual-vs-predicted plots to `src/common/evaluate.py` (`--plots`: one stacked PNG per horizon 100/300/600/1800, up to 50 files, model name in title); add matplotlib to `requirements/eval.txt`; render + download cells in the evaluate Colab notebook; add render tests | Medium |
+| 1.4 | 2026-07-24 03:07 | "Antons Matrosovs" - Claude | Content | TCN trainer: add EarlyStopping (`--patience`), log LR per epoch + expose `--lr-patience`/`--lr-factor`, and re-save the best checkpoint every improving epoch; update the TCN Colab cell + tests | Medium |
 
 ## Project layout
 
@@ -149,9 +150,15 @@ python src/tcn/tcn_forecast.py --mode predict
 
 Common overrides: `--window` (input length), `--channels` (e.g. `128,128,128,128`),
 `--kernel-size`, `--horizon` (autoregressive training horizon), `--epochs`,
-`--batch-size`, `--learning-rate`, `--max-train-files N`, `--checkpoint` (artifact path).
-Requires PyTorch (`torch`, in `requirements.txt`); it uses a GPU automatically when one is
-available and falls back to CPU otherwise. Adapted from
+`--batch-size`, `--learning-rate`, `--patience` (early-stop after N epochs with no val
+improvement; 0 disables), `--lr-patience` / `--lr-factor` (`ReduceLROnPlateau`),
+`--max-train-files N`, `--checkpoint` (artifact path). Training logs the current learning
+rate each epoch and **re-saves the best checkpoint every time val loss improves**, so an
+interrupted run still leaves the best-so-far model on disk. Note the receptive field grows
+with depth: 4 layers see ~60 steps, ~6 layers cover a 256-step window — add `--channels`
+layers if you want the model to actually use a long `--window`. Requires PyTorch (`torch`,
+in `requirements.txt`); it uses a GPU automatically when one is available and falls back to
+CPU otherwise. Adapted from
 [Tartas37/ABFS-2026-Lorenzs-wheel-ai-model](https://github.com/Tartas37/ABFS-2026-Lorenzs-wheel-ai-model).
 
 ## Evaluating / comparing training runs — `src/common/evaluate.py`

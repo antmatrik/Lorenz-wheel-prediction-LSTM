@@ -85,6 +85,12 @@ LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 1e-6
 GRAD_CLIP = 1.0
 VAL_FRACTION = 0.15
+# Learning-rate schedule (ReduceLROnPlateau) + early stopping, both keyed off val loss.
+LR_PATIENCE = 5           # halve the LR after this many epochs with no val improvement
+LR_FACTOR = 0.5           # LR multiplier applied on plateau
+MIN_LR = 1e-7             # floor for the LR schedule
+EARLY_STOP_PATIENCE = 10  # stop after this many epochs with no val improvement (0 = never)
+MIN_DELTA = 1e-6          # smallest val-loss drop that counts as an improvement
 # num_workers for the DataLoader; 0 keeps things simple/portable (safe on macOS/CI).
 NUM_WORKERS = 0
 
@@ -294,11 +300,22 @@ def train(
     weight_decay=WEIGHT_DECAY,
     horizon_discount=HORIZON_DISCOUNT,
     grad_clip=GRAD_CLIP,
+    lr_patience=LR_PATIENCE,
+    lr_factor=LR_FACTOR,
+    min_lr=MIN_LR,
+    patience=EARLY_STOP_PATIENCE,
+    min_delta=MIN_DELTA,
     num_workers=NUM_WORKERS,
     device=None,
     out_path=CHECKPOINT_OUTPUT_PATH,
 ):
-    """Train with a horizon-discounted autoregressive MSE loss; save the best model."""
+    """Train with a horizon-discounted autoregressive MSE loss.
+
+    The best-so-far model (lowest val loss) is written to ``out_path`` every time val
+    improves, so an interrupted run still leaves the best checkpoint on disk. Stops early
+    after ``patience`` epochs with no val improvement (0 disables); ``ReduceLROnPlateau``
+    (``lr_patience``/``lr_factor``) shrinks the LR on plateaus, and the current LR is logged.
+    """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -322,18 +339,25 @@ def train(
     )
 
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=5)
+    sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, factor=lr_factor, patience=lr_patience, min_lr=min_lr
+    )
     loss_fn = nn.MSELoss(reduction="none")
     amp_scaler = torch.amp.GradScaler(device, enabled=use_amp)
 
     best_val = float("inf")
     best_state = None
+    best_epoch = 0
+    epochs_since_improve = 0
 
     print(
         f"[TCN] device={device} amp={use_amp} train_windows={len(train_ds)} "
         f"val_windows={len(val_ds)} params={sum(p.numel() for p in model.parameters()):,}",
         flush=True,
     )
+    if not have_val:
+        print("[TCN] no validation windows -> LR schedule + early stopping disabled; "
+              "saving the final epoch.", flush=True)
 
     def _rollout_loss(xb, yb):
         horizon = yb.shape[1]
@@ -361,7 +385,9 @@ def train(
             train_loss += loss.item() * xb.size(0)
         train_loss /= len(train_ds)
 
+        lr_now = opt.param_groups[0]["lr"]
         val_str = "val_loss (n/a)"
+        improved = False
         if have_val:
             model.eval()
             val_loss = 0.0
@@ -373,15 +399,35 @@ def train(
             val_loss /= max(1, len(val_ds))
             sched.step(val_loss)
             val_str = f"val_loss {val_loss:.6f}"
-            if val_loss < best_val:
+            if val_loss < best_val - min_delta:
                 best_val = val_loss
+                best_epoch = epoch
                 best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                epochs_since_improve = 0
+                improved = True
+                # Persist the best model on every improvement, so an interrupted run
+                # still leaves the best-so-far checkpoint on disk.
+                save_checkpoint(model, scaler, window, num_channels, kernel_size,
+                                path=out_path, verbose=False)
+            else:
+                epochs_since_improve += 1
 
         print(
             f"[TCN] epoch {epoch:3d}/{epochs} | train_loss {train_loss:.6f} | "
-            f"{val_str} | {time.time() - t_epoch:.2f}s",
+            f"{val_str} | lr {lr_now:.2e} | {time.time() - t_epoch:.2f}s"
+            + ("  <- new best (saved)" if improved else ""),
             flush=True,
         )
+
+        lr_after = opt.param_groups[0]["lr"]
+        if lr_after < lr_now:
+            print(f"[TCN] ReduceLROnPlateau: lr {lr_now:.2e} -> {lr_after:.2e} "
+                  f"(no val improvement for {lr_patience} epochs)", flush=True)
+
+        if patience and have_val and epochs_since_improve >= patience:
+            print(f"[TCN] early stop at epoch {epoch}: no val improvement for {patience} "
+                  f"epochs (best val_loss {best_val:.6f} at epoch {best_epoch}).", flush=True)
+            break
 
     print(f"[TCN] training finished in {time.time() - t_start:.1f}s", flush=True)
 
@@ -396,8 +442,12 @@ def train(
 # 4. Checkpoint I/O
 # ---------------------------------------------------------------------------
 
-def save_checkpoint(model, scaler, window, num_channels, kernel_size, path=CHECKPOINT_OUTPUT_PATH):
-    """Persist weights + scaler + input window + architecture in one .pt file."""
+def save_checkpoint(model, scaler, window, num_channels, kernel_size,
+                    path=CHECKPOINT_OUTPUT_PATH, verbose=True):
+    """Persist weights + scaler + input window + architecture in one .pt file.
+
+    ``verbose=False`` suppresses the log line (used for the frequent per-epoch best saves).
+    """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -414,7 +464,8 @@ def save_checkpoint(model, scaler, window, num_channels, kernel_size, path=CHECK
         },
         path,
     )
-    print(f"[TCN] checkpoint saved: {path}", flush=True)
+    if verbose:
+        print(f"[TCN] checkpoint saved: {path}", flush=True)
 
 
 def load_checkpoint(path=CHECKPOINT_INPUT_PATH, device=None):
@@ -566,6 +617,11 @@ def train_mode():
         epochs=EPOCHS,
         batch_size=BATCH_SIZE,
         lr=LEARNING_RATE,
+        lr_patience=LR_PATIENCE,
+        lr_factor=LR_FACTOR,
+        min_lr=MIN_LR,
+        patience=EARLY_STOP_PATIENCE,
+        min_delta=MIN_DELTA,
         out_path=CHECKPOINT_OUTPUT_PATH,
     )
 
@@ -633,6 +689,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     g.add_argument("--kernel-size", type=int, help=f"Conv kernel size (default: {KERNEL_SIZE}).")
     g.add_argument("--horizon", type=int, help=f"Train rollout horizon (default: {HORIZON}).")
     g.add_argument("--learning-rate", type=float, help=f"Adam learning rate (default: {LEARNING_RATE}).")
+    g.add_argument("--patience", type=int,
+                   help=f"Early stop after N epochs with no val improvement; 0 disables "
+                        f"(default: {EARLY_STOP_PATIENCE}).")
+    g.add_argument("--lr-patience", type=int,
+                   help=f"ReduceLROnPlateau: shrink LR after N stagnant epochs (default: {LR_PATIENCE}).")
+    g.add_argument("--lr-factor", type=float,
+                   help=f"ReduceLROnPlateau: LR multiplier on plateau (default: {LR_FACTOR}).")
     g.add_argument("--max-train-files", type=int, help="Use only the first N training files (0 = all).")
     g.add_argument("--train-glob", help="Override the training-file glob pattern.")
 
@@ -649,7 +712,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def _apply_overrides(args) -> None:
     global MODE, EPOCHS, BATCH_SIZE, WINDOW, NUM_CHANNELS, KERNEL_SIZE, HORIZON, LEARNING_RATE
-    global MAX_TRAIN_FILES, TRAIN_FILES_GLOB
+    global MAX_TRAIN_FILES, TRAIN_FILES_GLOB, EARLY_STOP_PATIENCE, LR_PATIENCE, LR_FACTOR
     global PREDICT_FILE_PATH, PREDICT_INPUT_POINTS, PREDICT_OUTPUT_POINTS, PREDICT_OUTPUT_PATH
     global CHECKPOINT_OUTPUT_PATH, CHECKPOINT_INPUT_PATH
 
@@ -660,6 +723,12 @@ def _apply_overrides(args) -> None:
 
     if args.epochs is not None:
         EPOCHS = args.epochs
+    if args.patience is not None:
+        EARLY_STOP_PATIENCE = args.patience
+    if args.lr_patience is not None:
+        LR_PATIENCE = args.lr_patience
+    if args.lr_factor is not None:
+        LR_FACTOR = args.lr_factor
     if args.batch_size is not None:
         BATCH_SIZE = args.batch_size
     if args.window is not None:
